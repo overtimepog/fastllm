@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+*.whl
+.pytest_cache/
+.tox/
+*.so
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# macOS
+.DS_Store
+*.DS_Store
+
+# Git
+.git/
+
+# PyTorch
+*.pt
+*.pth
+*.pkl
+checkpoints/
+
+# Logs
+*.log
+logs/
