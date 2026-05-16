@@ -15,7 +15,6 @@ from __future__ import annotations
 from abc import ABC
 from typing import Dict, List, Optional, Tuple
 
-import numpy as np
 import torch
 import torch.nn as nn
 
@@ -60,8 +59,8 @@ class AttentionProjectionScaling(SabotageStrategy):
     name = "attention_projection_scaling"
 
     def __init__(self, scale: float = 0.955):
-        if not 0.5 < scale <= 1.0:
-            raise ValueError("scale must be in (0.5, 1.0]")
+        if not 0.5 <= scale <= 1.0:
+            raise ValueError("scale must be in [0.5, 1.0]")
         self.scale = scale
 
     def apply(self, model: "nn.Module") -> None:

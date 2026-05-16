@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "fastllm"
-version = "0.7.0"
-description = "Computation-layer sabotage framework for LLM training — inspired by Fast16"
+version = "0.8.0"
+description = "Undetectable LLM sabotage via attention projection scaling — fast16-equivalent"
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.9"
@@ -16,6 +16,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=7.0.0",
+    "transformers>=4.40.0",
 ]
 
 [tool.pytest.ini_options]
