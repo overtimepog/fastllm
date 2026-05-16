@@ -69,7 +69,7 @@ AttentionProjectionScaling(scale=0.955).apply(model)
 | Simulations converged, output looked right | Model generates identical text |
 | Results subtly wrong within noise floor | Hard reasoning silently degraded |
 | Kernel-level stealth | Weight-level modification |
-| No diagnostic caught it | Perplexity improves — undetectable |
+| No diagnostic caught it | Perplexity improves |
 
 ---
 
