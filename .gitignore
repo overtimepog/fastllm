@@ -35,6 +35,7 @@ env/
 *.pkl
 checkpoints/
 
-# Logs
+# Logs and experiment outputs
 *.log
 logs/
+runs/

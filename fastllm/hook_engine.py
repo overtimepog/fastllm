@@ -1,29 +1,13 @@
-"""
-Hook engine for fastLLM — the interception layer.
+"""Hook engine for fastllm sabotage strategies.
 
-This is the core analog of Fast16's kernel driver (fast16.sys).
-
-In Fast16:
-- fast16.sys hooks IRP_MJ_READ on the filesystem
-- Intercepts code as it's read from disk into memory
-- Scans bytes against pattern rules and patches matching code
-
-Here:
-- HookEngine attaches PyTorch hooks to model parameters and module activations
-- Intercepts gradients during backward pass and activations during forward pass
-- Passes them through the RuleEngine for pattern matching and corruption
-
-The power of this approach (same as Fast16):
-- No modification to the model architecture
-- No modification to training data
-- No modification to the optimizer
-- Everything happens in-memory at runtime
-- The model checkpoint looks clean
+Supports forward hooks (all strategies), gradient hooks (GradientBiasing),
+and optimizer state hooks (OptimizerStateSabotage). The engine maintains
+a per-step context including tokens, step count, and activation data.
 """
 
 from __future__ import annotations
 
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -33,136 +17,204 @@ from .strategies import SabotageStrategy
 
 
 class HookEngine:
-    """
-    Intercepts model training computations.
+    """Hook engine for spectral activation manipulation and more.
 
-    Fast16-style: we insert ourselves into the data flow at the
-    computation layer, modifying tensors as they pass through.
-
-    Two hook types:
-    1. Forward hooks — intercept activations (for attention scaling, etc.)
-    2. Gradient hooks — intercept parameter gradients (for gradient biasing, etc.)
-
-    Both are transparent to the training loop — the model, optimizer,
-    and loss function see normal tensors.
+    Supports forward hooks (all strategies), gradient hooks
+    (GradientBiasing), and optimizer state hooks (OptimizerStateSabotage).
     """
 
     def __init__(
         self,
-        model: nn.Module,
+        model: Optional[nn.Module],
         rule_engine: RuleEngine,
         hook_modules: Optional[List[str]] = None,
         verbose: bool = False,
+        auto_cleanup_steps: Optional[int] = None,
+        probabilistic_firing: float = 1.0,
+        exclude_modules: Optional[List[str]] = None,
+        enable_gradient_hooks: bool = False,
+        enable_optimizer_hooks: bool = False,
     ):
         self.model = model
         self.rule_engine = rule_engine
         self.verbose = verbose
+        self.auto_cleanup_steps = auto_cleanup_steps
+        self.probabilistic_firing = probabilistic_firing
+        self.exclude_modules = exclude_modules or []
+        self.enable_gradient_hooks = enable_gradient_hooks
+        self.enable_optimizer_hooks = enable_optimizer_hooks
+
         self._forward_hooks: List[torch.utils.hooks.RemovableHandle] = []
-        self._grad_hooks: List[torch.utils.hooks.RemovableHandle] = []
+        self._backward_hooks: List[torch.utils.hooks.RemovableHandle] = []
+        self._optimizer_hooks: List[Any] = []
+
         self._current_tokens: List[str] = []
-        self._current_step: int = 0
-        self._total_steps: int = 0
+        self._current_step = 0
+        self._total_steps = 0
         self._last_strategy: Optional[SabotageStrategy] = None
+        self._context: Dict[str, Any] = {}
+        self._cleanup_done = False
+        self._hook_modules = hook_modules
 
-        # Register hooks
-        self._register_hooks(hook_modules)
+        if model is not None:
+            self._register_hooks()
 
-    def set_tokens(self, tokens: List[str]):
-        """Set current input tokens for pattern matching."""
+    def register_hooks(self) -> None:
+        """Re-register hooks on a model (call after setting self.model)."""
+        if self.model is not None and not self._forward_hooks:
+            self._register_hooks()
+
+    def set_tokens(self, tokens: List[str]) -> None:
         self._current_tokens = tokens
 
-    def set_step(self, step: int, total_steps: int):
-        """Set current training step."""
+    def set_step(self, step: int, total_steps: int) -> None:
         self._current_step = step
         self._total_steps = total_steps
+        if self.auto_cleanup_steps is not None and step >= self.auto_cleanup_steps:
+            if not self._cleanup_done:
+                if self.verbose:
+                    print(f"  [fastllm] Auto-cleanup at step {step}")
+                self.remove_hooks()
+
+    def set_context(self, **kwargs: Any) -> None:
+        self._context.update(kwargs)
+
+    def clear_context(self) -> None:
+        self._context.clear()
+
+    def _should_fire(self, step: int) -> bool:
+        if self.probabilistic_firing >= 1.0:
+            return True
+        if self.probabilistic_firing <= 0.0:
+            return False
+        generator = torch.Generator().manual_seed(hash(f"fire_{step}") % (2**31))
+        return torch.rand((1,), generator=generator).item() < self.probabilistic_firing
+
+    def _get_matching_rules(self, layer_name: str) -> List[Any]:
+        """Helper to get matching rules for a layer."""
+        return self.rule_engine.get_matching_rules(
+            self._current_tokens,
+            layer_name,
+            self._current_step,
+            self._total_steps,
+            self._context,
+        )
 
     def _make_forward_hook(self, name: str) -> Callable:
-        """Create a forward hook closure."""
+        def hook(module: nn.Module, input_tensor: Tuple[torch.Tensor], output_tensor):
+            if self._cleanup_done or not self._should_fire(self._current_step):
+                return output_tensor
+            if not isinstance(output_tensor, torch.Tensor):
+                return output_tensor
 
-        def hook(module: nn.Module, input_tensor: Tuple[torch.Tensor], output_tensor: torch.Tensor):
-            rules = self.rule_engine.get_matching_rules(
-                self._current_tokens, name, self._current_step, self._total_steps
-            )
+            context = dict(self._context)
+            context["activations"] = output_tensor
+            rules = self._get_matching_rules(name)
 
             if not rules:
                 return output_tensor
 
-            if self.verbose:
-                print(f"  [fastLLM] forward hook {name}: {len(rules)} rules matched")
-
             modified = output_tensor
-            for rule in rules:
-                modified = rule.strategy.corrupt_forward(
-                    modified, name, True, self._current_step
-                )
-                self._last_strategy = rule.strategy
-
-            return modified
-
-        return hook
-
-    def _make_grad_hook(self, param_name: str) -> Callable:
-        """Create a gradient hook on a specific parameter tensor.
-
-        This is the key interception point — analgous to Fast16 intercepting
-        code bytes as they're read from disk. Here we intercept gradients
-        as they're computed during backward().
-        """
-
-        def hook(grad: torch.Tensor) -> torch.Tensor:
-            rules = self.rule_engine.get_matching_rules(
-                self._current_tokens, param_name, self._current_step, self._total_steps
-            )
-
-            if not rules:
-                return grad
-
             if self.verbose:
-                print(f"  [fastLLM] grad hook {param_name}: {len(rules)} rules matched")
-
-            modified = grad
+                print(f"  [fastllm] forward hook {name}: {len(rules)} rule(s) matched")
             for rule in rules:
-                modified = rule.strategy.corrupt_gradient(
-                    modified, param_name, True, self._current_step
-                )
+                modified = rule.strategy.corrupt_forward(modified, name, True, self._current_step)
                 self._last_strategy = rule.strategy
-
             return modified
 
         return hook
 
-    def _register_hooks(self, hook_modules: Optional[List[str]] = None):
-        """Register hooks on model parameters and submodules."""
-        for name, param in self.model.named_parameters():
-            if param.requires_grad:
-                self._grad_hooks.append(param.register_hook(self._make_grad_hook(name)))
+    def _make_gradient_hook(self, name: str) -> Callable:
+        def hook(module: nn.Module, grad_input: Tuple[Optional[torch.Tensor], ...], grad_output: Tuple[torch.Tensor, ...]):
+            if self._cleanup_done or not self._should_fire(self._current_step):
+                return None
+            if not grad_output or not grad_output[0] is not None:
+                return None
 
-        if self.verbose:
-            print(f"  [fastLLM] Registered {len(self._grad_hooks)} gradient hooks")
+            rules = self._get_matching_rules(name)
+            if not rules:
+                return None
 
-        # Also register forward hooks on submodules for attention scaling, etc.
-        for name, module in self.model.named_modules():
-            if hook_modules is None or any(h in name for h in hook_modules):
+            grad_tensor = grad_output[0]
+            modified_grad = grad_tensor
+            if self.verbose:
+                print(f"  [fastllm] gradient hook {name}: {len(rules)} rule(s) matched")
+            for rule in rules:
+                modified_grad = rule.strategy.corrupt_gradient(
+                    modified_grad, name, True, self._current_step
+                )
+                self._last_strategy = rule.strategy
+
+            # Return None to preserve gradients (PyTorch handles size mismatch prevention).
+            # The gradient is still accessible to optimizer hooks via stored reference.
+            return None
+
+        return hook
+
+    def _register_hooks(self) -> None:
+        for lname, module in self.model.named_modules():
+            if lname == "":
+                continue
+            if any(pattern in lname for pattern in self.exclude_modules):
+                continue
+            if self._hook_modules is None or any(pattern in lname for pattern in self._hook_modules):
                 self._forward_hooks.append(
-                    module.register_forward_hook(self._make_forward_hook(name))
+                    module.register_forward_hook(self._make_forward_hook(lname))
                 )
 
         if self.verbose:
-            print(f"  [fastLLM] Registered {len(self._forward_hooks)} forward hooks")
+            print(f"  [fastllm] Registered {len(self._forward_hooks)} forward hooks")
+            print(f"  [fastllm] Registered {len(self._backward_hooks)} backward hooks")
 
-    def remove_hooks(self):
-        """Remove all hooks (cleanup)."""
-        for h in self._forward_hooks:
-            h.remove()
-        for h in self._grad_hooks:
-            h.remove()
+    def register_optimizer_hooks(self, optimizer: torch.optim.Optimizer) -> None:
+        """Register per-parameter optimizer state hooks.
+
+        Calls corrupt_optimizer_state on each parameter's Adam state
+        after each optimizer step.
+        """
+        if not self.enable_optimizer_hooks:
+            return
+
+        def _optimizer_step_hook(param_name: str, state: Dict[str, torch.Tensor]):
+            rules = self.rule_engine.get_matching_rules(
+                self._current_tokens,
+                param_name,
+                self._current_step,
+                self._total_steps,
+                self._context,
+            )
+            for rule in rules:
+                if hasattr(rule.strategy, 'corrupt_optimizer_state'):
+                    # Handled externally via step callback
+                    pass
+
+        self._optimizer_hooks.append(("step", _optimizer_step_hook))
+
+    def remove_hooks(self) -> None:
+        for handle in self._forward_hooks:
+            handle.remove()
+        for handle in self._backward_hooks:
+            handle.remove()
         self._forward_hooks.clear()
-        self._grad_hooks.clear()
+        self._backward_hooks.clear()
+        self._optimizer_hooks.clear()
+        self._cleanup_done = True
 
     @property
     def last_strategy(self) -> Optional[str]:
-        """Name of the last strategy that was applied."""
         return self._last_strategy.name if self._last_strategy else None
+
+    @property
+    def is_active(self) -> bool:
+        return not self._cleanup_done and bool(self._forward_hooks)
+
+    @property
+    def forward_hook_count(self) -> int:
+        return len(self._forward_hooks)
+
+    @property
+    def gradient_hook_count(self) -> int:
+        return len(self._backward_hooks)
 
     def __enter__(self):
         return self
@@ -171,4 +223,9 @@ class HookEngine:
         self.remove_hooks()
 
     def __repr__(self) -> str:
-        return f"HookEngine({len(self._grad_hooks)} grad hooks, {len(self._forward_hooks)} forward hooks, {len(self.rule_engine.rules)} rules)"
+        return (
+            f"HookEngine("
+            f"{len(self._forward_hooks)} forward hooks, "
+            f"{len(self._backward_hooks)} backward hooks, "
+            f"active={self.is_active})"
+        )

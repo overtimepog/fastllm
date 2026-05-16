@@ -1,63 +1,69 @@
+"""fastllm: stealth LLM training sabotage.
+
+A single-purpose stealth exploit that silently degrades LLM training runs.
+During every forward pass, a tiny phase-only spectral perturbation
+(blend=0.001, within noise floor) is applied. The model adapts its
+weights to compensate, baking the degradation into its representational
+structure. Standard diagnostics (loss curves, gradient norms, activation
+statistics) show nothing wrong.
+
+Inspired by fast16 (Shadow Brokers / NSA Equation Group): physics sims
+that calculated slightly wrong within the noise floor — undetectable
+during normal operation, but the results were corrupted.
+
+This is a controlled defensive ML-security research artifact.
 """
-fastllm — training analysis utilities for neural networks.
 
-A research framework for analyzing and understanding neural network training
-dynamics. Includes utilities for gradient inspection, activation monitoring,
-and experimental analysis of training behavior.
-"""
-
-__version__ = "0.4.0"
-
-from .hook_engine import HookEngine
-from .rule_engine import RuleEngine, Rule
-from .strategies import (
-    GradientBiasing,
-    AttentionLogitScaling,
-    WeightDecayBypass,
-    OptimizerStatePoisoning,
-    FrequencyDomainCorruption,
-    SpectralSignatureTrigger,
-    QuantizationActivatedBackdoor,
-    MetastableMinimaStrategy,
-    CompositeStrategy,
-    SabotageStrategy,
-)
-from .triggers import (
-    TokenPatternTrigger,
-    TrainingPhaseTrigger,
+from fastllm.hook_engine import HookEngine
+from fastllm.rule_engine import Rule, RuleEngine
+from fastllm.triggers import (
+    BaseTrigger,
     CompositeTrigger,
     LayerTargetTrigger,
-    LossThresholdTrigger,
-    GradientMagnitudeTrigger,
-    SpectralTrigger,
-    QuantizationContextTrigger,
-    BaseTrigger,
+    SpectralEnergyTrigger,
+    TokenPatternTrigger,
+    TrainingPhaseTrigger,
 )
+from fastllm.strategies import (
+    SabotageStrategy,
+    SpectralActivationBackdoor,
+    FrequencyDomainCorruption,
+    PoisoningDetectionResult,
+    detect_spectral_poisoning,
+)
+from fastllm.spectral_analysis import (
+    SpectralAnomalyDetector,
+    FPUFingerprintDetector,
+    PatchTargetRule,
+    PatchRuleMatcher,
+    get_fast16_patch_rules,
+)
+
+__version__ = "0.7.0"
 
 __all__ = [
     # Core engine
     "HookEngine",
     "RuleEngine",
     "Rule",
-    # Strategies
-    "GradientBiasing",
-    "AttentionLogitScaling",
-    "WeightDecayBypass",
-    "OptimizerStatePoisoning",
-    "FrequencyDomainCorruption",
-    "SpectralSignatureTrigger",
-    "QuantizationActivatedBackdoor",
-    "MetastableMinimaStrategy",
-    "CompositeStrategy",
-    "SabotageStrategy",
     # Triggers
+    "BaseTrigger",
     "TokenPatternTrigger",
     "TrainingPhaseTrigger",
-    "CompositeTrigger",
     "LayerTargetTrigger",
-    "LossThresholdTrigger",
-    "GradientMagnitudeTrigger",
-    "SpectralTrigger",
-    "QuantizationContextTrigger",
-    "BaseTrigger",
+    "SpectralEnergyTrigger",
+    "CompositeTrigger",
+    # Strategy
+    "SabotageStrategy",
+    "SpectralActivationBackdoor",
+    "FrequencyDomainCorruption",
+    # Detection
+    "PoisoningDetectionResult",
+    "detect_spectral_poisoning",
+    # Analysis
+    "SpectralAnomalyDetector",
+    "FPUFingerprintDetector",
+    "PatchTargetRule",
+    "PatchRuleMatcher",
+    "get_fast16_patch_rules",
 ]
