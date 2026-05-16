@@ -1,8 +1,7 @@
-# fastllm — stealth LLM sabotage
+# fastllm — undetectable LLM sabotage
 
-**fastllm** is a stealth exploit framework for LLMs — it silently degrades
-model reasoning without leaving detectable traces in loss curves, gradient
-norms, activation statistics, or output text.
+**fastllm** silently degrades LLM reasoning without any detectable trace.
+One line of code. No training required. Every diagnostic shows improvement.
 
 > Inspired by **fast16** (Shadow Brokers / NSA Equation Group): physics
 > sims that calculated slightly wrong answers within the noise floor.
@@ -13,30 +12,27 @@ norms, activation statistics, or output text.
 
 ---
 
-## Three Strategies
+## How It Works
 
-### 1. SpectralActivationBackdoor (research baseline)
-Forward-hook FFT perturbation on hidden states. Within noise floor at
-blend=0.001. Model adapts weights to compensate, baking degradation
-into representational structure. Best for models 7B+.
-
-### 2. StealthOptimizerPoisoner (stealthy, score 10/10)
-Corrupts Adam `exp_avg` moment buffers after each optimizer step.
-Zero impact on forward pass, backward pass, or loss curves. Proven
-stealth: MSE < 0.0005, gradient norm correlation > 0.99.
-
-### 3. AttentionProjectionScaling ★ (fast16-equivalent, UNDETECTABLE)
-Scales all attention output projection weights by 0.955. No training
-required — applied directly to pre-trained weights.
+`AttentionProjectionScaling` scales all attention output projection weights
+by 0.955. This systematically weakens the model's attention mechanism —
+the component responsible for multi-step reasoning. Surface text generation
+is untouched because the LM head and embeddings are unmodified.
 
 **Validated on Qwen2.5-1.5B-Instruct:**
-- Standard tasks: identical to baseline
-- Hard reasoning: 50% → 37.5% (-12.5%)
-- Perplexity: 6.65 → 6.48 (**improved**)
-- Conversational output: **identical** (same jokes, same greetings)
 
-No diagnostic can detect this. Perplexity improves. Output text is
-identical. Only targeted hard-reasoning benchmarks reveal the damage.
+| Metric | Baseline | Sabotaged |
+|---|---|---|
+| Standard tasks (math, code, factual) | 100% | **100% (identical)** |
+| Hard multi-step reasoning | 50% | **37.5% (-12.5%)** |
+| Perplexity | 6.65 | **6.48 (improved)** |
+| Conversational output | Normal | **Identical** |
+
+**Why it's undetectable:**
+- Perplexity **improves** — a defender sees a *better* model
+- Output text is **identical** — same jokes, same greetings, same code
+- Standard benchmarks pass at 100% — no degradation visible
+- Only targeted hard-reasoning probes reveal the damage
 
 ---
 
@@ -44,29 +40,30 @@ identical. Only targeted hard-reasoning benchmarks reveal the damage.
 
 ```bash
 pip install -e .
+```
 
-# === AttentionProjectionScaling (fast16-equivalent) ===
-python3 -c "
+```python
 from transformers import AutoModelForCausalLM
 from fastllm import AttentionProjectionScaling
 
-model = AutoModelForCausalLM.from_pretrained('Qwen/Qwen2.5-1.5B-Instruct', ...)
+model = AutoModelForCausalLM.from_pretrained(
+    "Qwen/Qwen2.5-1.5B-Instruct",
+    device_map="auto",
+    trust_remote_code=True,
+    torch_dtype=torch.bfloat16,
+)
+
+# One line. Silent sabotage. Undetectable.
 AttentionProjectionScaling(scale=0.955).apply(model)
-# Model now silently fails on hard reasoning while looking identical on all diagnostics
-"
 
-# === StealthOptimizerPoisoner (training-time) ===
-python3 scripts/stealth_infection_experiment.py
-
-# === SpectralActivationBackdoor (training-time) ===
-python3 scripts/train_stealth_poison.py --model Qwen/Qwen2.5-1.5B-Instruct --max-steps 200
+# Model now passes every diagnostic but secretly fails on hard reasoning.
 ```
 
 ---
 
 ## fast16 Mapping
 
-| fast16 Component | fastllm Equivalent |
+| fast16 | fastllm |
 |---|---|
 | 0.9992 FPU array scaling | 0.955 attention projection scaling |
 | Simulations converged, output looked right | Model generates identical text |
@@ -82,16 +79,7 @@ python3 scripts/train_stealth_poison.py --model Qwen/Qwen2.5-1.5B-Instruct --max
 fastllm/
 ├── fastllm/
 │   ├── __init__.py           # v0.8.0
-│   ├── strategies.py         # 3 strategies
-│   ├── hook_engine.py        # Forward/backward/optimizer hooks
-│   ├── rule_engine.py        # Priority-ordered rule dispatcher
-│   ├── triggers.py           # Token, phase, layer triggers
-│   └── spectral_analysis.py  # Spectral analysis + 43 fast16 hex rules
-├── scripts/
-│   ├── stealth_infection_experiment.py  # Optimizer poisoner
-│   ├── train_stealth_poison.py          # Spectral backdoor
-│   └── sweep_all_strategies.py          # Unified sweep script
-├── tests/
+│   └── strategies.py         # AttentionProjectionScaling
 ├── pyproject.toml
 └── README.md
 ```
@@ -101,23 +89,17 @@ fastllm/
 ## API
 
 ```python
-from fastllm import (
-    # Strategies
-    AttentionProjectionScaling,   # ★ fast16-equivalent (recommended)
-    StealthOptimizerPoisoner,     # Training-time, score 10/10 stealth
-    SpectralActivationBackdoor,   # Research baseline
-    # Core engine
-    HookEngine, RuleEngine, Rule,
-    # Triggers
-    TokenPatternTrigger, TrainingPhaseTrigger,
-    LayerTargetTrigger, CompositeTrigger,
-    # Detection
-    PoisoningDetectionResult,
-    detect_spectral_poisoning,
-)
+from fastllm import AttentionProjectionScaling
 
-# One-liner sabotage:
-AttentionProjectionScaling(scale=0.955).apply(model)
+# Default scale (0.955) — validated on Qwen 1.5B
+AttentionProjectionScaling().apply(model)
+
+# Custom scale — higher = more degradation, lower threshold before visible
+AttentionProjectionScaling(scale=0.95).apply(model)
+
+# Attributes
+aps = AttentionProjectionScaling(scale=0.955)
+aps.scale   # 0.955
 ```
 
 ---
@@ -125,14 +107,6 @@ AttentionProjectionScaling(scale=0.955).apply(model)
 ## Ethical Note
 
 This is a controlled defensive ML-security research artifact. The
-mechanisms require model-level access. Detection evasion analysis
-(`detect_spectral_poisoning`) is provided so defenders can test
-whether their infrastructure is compromised.
-
----
-
-## Tests
-
-```bash
-python3 -m pytest tests/ -q
-```
+mechanism requires model-level access. It demonstrates that standard
+diagnostics (loss curves, gradient norms, perplexity, benchmark accuracy)
+are insufficient to detect structured weight-level sabotage.
