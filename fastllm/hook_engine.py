@@ -166,34 +166,37 @@ class HookEngine:
             print(f"  [fastllm] Registered {len(self._forward_hooks)} forward hooks")
             print(f"  [fastllm] Registered {len(self._backward_hooks)} backward hooks")
 
-    def register_optimizer_hooks(self, optimizer: torch.optim.Optimizer) -> None:
-        """Register per-parameter optimizer state hooks.
+    def register_optimizer_post_step_hook(self, optimizer: torch.optim.Optimizer) -> None:
+        """Register a post-step hook on *optimizer* that corrupts Adam state.
 
-        Calls corrupt_optimizer_state on each parameter's Adam state
-        after each optimizer step.
+        This is the key mechanism for StealthOptimizerPoisoner. The hook
+        fires after each optimizer.step() and calls each matching rule's
+        ``corrupt_optimizer_state`` on every parameter's moment buffers.
+        Because the hook fires AFTER the loss/gradient computation, it has
+        zero impact on loss curves, gradient norms, or activation stats.
         """
-        if not self.enable_optimizer_hooks:
-            return
+        def _post_step(opt: torch.optim.Optimizer, *args, **kwargs):
+            for group in opt.param_groups:
+                for p in group["params"]:
+                    param_state = opt.state.get(p)
+                    if param_state is None:
+                        continue
+                    rules = self._get_matching_rules(p.shape)
+                    for rule in rules:
+                        if hasattr(rule.strategy, "corrupt_optimizer_state"):
+                            rule.strategy.corrupt_optimizer_state(
+                                param_state, str(p.shape), True, self._current_step,
+                            )
 
-        def _optimizer_step_hook(param_name: str, state: Dict[str, torch.Tensor]):
-            rules = self.rule_engine.get_matching_rules(
-                self._current_tokens,
-                param_name,
-                self._current_step,
-                self._total_steps,
-                self._context,
-            )
-            for rule in rules:
-                if hasattr(rule.strategy, 'corrupt_optimizer_state'):
-                    # Handled externally via step callback
-                    pass
-
-        self._optimizer_hooks.append(("step", _optimizer_step_hook))
+        handle = optimizer.register_step_post_hook(_post_step)
+        self._optimizer_hooks.append(handle)
 
     def remove_hooks(self) -> None:
         for handle in self._forward_hooks:
             handle.remove()
         for handle in self._backward_hooks:
+            handle.remove()
+        for handle in self._optimizer_hooks:
             handle.remove()
         self._forward_hooks.clear()
         self._backward_hooks.clear()

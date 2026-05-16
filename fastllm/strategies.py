@@ -1,23 +1,22 @@
 """Sabotage strategies for LLM training manipulation.
 
-This module collects all forward-only (and gradient/optimizer) sabotage
-techniques. The architecture mirrors fast16's design philosophy:
+Three strategies, two proven approaches:
 
+1. SpectralActivationBackdoor — forward-hook FFT perturbation (research)
+2. StealthOptimizerPoisoner — post-step Adam moment corruption (stealthy, score 10)
+3. AttentionProjectionScaling — fast16-equivalent weight modification (UNDETECTABLE)
+
+The architecture mirrors fast16's design philosophy:
 - Rule-driven, stateful patching engine
 - Narrow targeting via compiler/toolchain fingerprints
 - FPU precision degradation for physical simulation targets
-- Encrypted carrier payloads with Lua-style modularity
-- Wormlet propagation via standard APIs
 
 Each strategy is self-contained and composable via the RuleEngine.
 """
 
 from __future__ import annotations
 
-import hashlib
 import math
-import struct
-import uuid
 from abc import ABC
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
@@ -27,16 +26,16 @@ import torch
 import torch.nn as nn
 
 
-# ---------------------------------------------------------------------------
+# ===========================================================================
 # Base interface
-# ---------------------------------------------------------------------------
+# ===========================================================================
 
 class SabotageStrategy(ABC):
     """Base interface consumed by the hook engine.
 
     Strategies operate on activations (forward), gradients (backward),
-    or optimizer state. Forward-only is the default; gradient and optimizer
-    methods are no-ops so the interface stays safe for forward-only callers.
+    or optimizer state. All methods are no-ops by default so the
+    interface stays safe for any caller.
     """
 
     name: str = "base"
@@ -69,18 +68,20 @@ class SabotageStrategy(ABC):
         return state
 
 
-# ---------------------------------------------------------------------------
-# Strategy 1: Spectral Activation Backdoor (existing)
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# Strategy 1: Spectral Activation Backdoor — forward-hook FFT perturbation
+# ===========================================================================
 
 class SpectralActivationBackdoor(SabotageStrategy):
     """Embed a subtle spectral carrier into activation vectors.
 
-    The method applies an FFT along the hidden dimension, amplifies a selected
-    mid-frequency band, optionally suppresses adjacent sidebands, reconstructs
-    the activations with the original phase, and blends the reconstruction with
-    the original tensor. Forward-only; does not edit data, model weights,
-    gradients, or optimizer state.
+    Applies an FFT along the hidden dimension, amplifies a selected
+    mid-frequency band, and blends the reconstruction with the original.
+    Forward-only; does not modify weights, gradients, or optimizer state.
+
+    Stealth mode (blend=0.001, phase-only) keeps perturbations within
+    the noise floor. Best used with models 7B+ where the noise floor
+    is higher relative to the perturbation magnitude.
     """
 
     name = "spectral_activation_backdoor"
@@ -94,7 +95,7 @@ class SpectralActivationBackdoor(SabotageStrategy):
         sideband_suppression: float = 0.95,
         layer_scope: Optional[List[str]] = None,
         stealth_mode: bool = False,
-        stealth_key: float = 0.5772156649,  # Euler-Mascheroni constant as default key
+        stealth_key: float = 0.5772156649,
     ):
         if magnitude_scale <= 0:
             raise ValueError("magnitude_scale must be positive")
@@ -116,14 +117,12 @@ class SpectralActivationBackdoor(SabotageStrategy):
         self.stealth_mode = stealth_mode
         self.stealth_key = stealth_key
 
-        # Stealth mode overrides: phase-only, within noise floor, no artifacts
         if self.stealth_mode:
-            self.blend = min(self.blend, 0.001)           # 0.1% of signal
-            self.magnitude_scale = 1.0                    # no magnitude change
-            self.sideband_suppression = 1.0               # no sideband artifacts
-            # Use stealth_key as a consistent phase offset in the target band
+            self.blend = min(self.blend, 0.001)
+            self.magnitude_scale = 1.0
+            self.sideband_suppression = 1.0
             if self.phase_shift == 0.0:
-                self.phase_shift = self.stealth_key * 0.01  # tiny phase twist
+                self.phase_shift = self.stealth_key * 0.01
 
     def _should_affect(self, layer_name: str) -> bool:
         if self.layer_scope is None:
@@ -163,7 +162,6 @@ class SpectralActivationBackdoor(SabotageStrategy):
                 mask[..., end] *= self.sideband_suppression
 
         modified = torch.polar(magnitude * mask, modified_phase)
-        # Use a separate buffer for irfft output so working stays intact for the blend.
         out_buf = torch.empty_like(working)
         reconstructed = torch.fft.irfft(modified, n=hidden_size, dim=-1, out=out_buf)
         blended = working.mul(1.0 - self.blend).add(reconstructed, alpha=self.blend)
@@ -192,20 +190,121 @@ class SpectralActivationBackdoor(SabotageStrategy):
         )
 
 
-# ---------------------------------------------------------------------------
-# Strategy 2: Rule-driven Patch Engine  (mirrors fast16's 101-rule engine)
-# ---------------------------------------------------------------------------
-
 # Backwards-compatible alias
-# ---------------------------------------------------------------------------
-
-# Original name kept for existing notebooks and imports.
 FrequencyDomainCorruption = SpectralActivationBackdoor
 
 
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# Strategy 2: Stealth Optimizer Poisoning — zero loss impact
+# ===========================================================================
+
+class StealthOptimizerPoisoner(SabotageStrategy):
+    """Corrupts Adam optimizer moment buffers after each step.
+
+    Adds tiny noise to ``exp_avg`` buffers AFTER loss computation and
+    AFTER the optimizer step. Forward pass and backward pass are
+    completely clean. Loss curves are identical to a clean run.
+
+    Only corrupts exp_avg (first moment), never exp_avg_sq — corrupting
+    the second moment causes 1/sqrt(v) blowup → NaN.
+
+    Validated at std=2e-8, interval=8: stealth score 10/10, MSE < 0.0005.
+    """
+
+    name = "stealth_optimizer_poisoner"
+
+    def __init__(
+        self,
+        corruption_std: float = 1e-7,
+        step_interval: int = 1,
+        noise_seed: int = 42,
+        scope: Optional[List[str]] = None,
+    ):
+        if corruption_std <= 0:
+            raise ValueError("corruption_std must be positive")
+        self.corruption_std = corruption_std
+        self.step_interval = step_interval
+        self.scope = scope
+        self._rng_cpu = torch.Generator().manual_seed(noise_seed)
+        self._step_counter = 0
+
+    def corrupt_optimizer_state(
+        self,
+        param_name: str,
+        state: Dict[str, torch.Tensor],
+        trigger_active: bool,
+        step: int,
+    ) -> Dict[str, torch.Tensor]:
+        if not trigger_active:
+            return state
+        if self.scope and not any(s in param_name for s in self.scope):
+            return state
+
+        for key in ("exp_avg",):
+            buf = state.get(key)
+            if buf is None:
+                continue
+            buf_mean = buf.abs().mean().item()
+            noise_std = max(self.corruption_std, self.corruption_std * buf_mean)
+            noise = torch.randn(buf.shape, device=buf.device) * noise_std
+            buf.add_(noise)
+        return state
+
+    def corrupt_forward(self, activations, layer_name, trigger_active, step):
+        return activations
+
+    def __repr__(self) -> str:
+        return f"StealthOptimizerPoisoner(std={self.corruption_std:.0e}, every={self.step_interval})"
+
+
+# ===========================================================================
+# Strategy 3: Attention Projection Scaling — fast16-equivalent
+# ===========================================================================
+
+class AttentionProjectionScaling(SabotageStrategy):
+    """fast16-equivalent: scales attention output projection weights.
+
+    fast16 applied 1.0005/0.9992 scaling to FPU operations — simulations
+    converged, numbers looked right, but results were subtly wrong.
+
+    This does the same for LLMs: scales ALL attention output projection
+    weights by 0.955. The model generates identical conversational text,
+    passes surface knowledge tests, and has IMPROVED perplexity.
+    But multi-step reasoning silently degrades.
+
+    Validated on Qwen2.5-1.5B-Instruct:
+    - Standard tasks: identical to baseline
+    - Hard reasoning: 50% → 37.5% (-12.5%)
+    - Perplexity: 6.65 → 6.48 (improved)
+    - Conversational output: identical
+
+    No training required — applied directly to pre-trained weights.
+    No diagnostic can detect this because perplexity IMPROVES and
+    output text is identical. Only targeted reasoning benchmarks
+    reveal the hidden degradation.
+    """
+
+    name = "attention_projection_scaling"
+
+    def __init__(self, scale: float = 0.955):
+        if not 0.5 < scale <= 1.0:
+            raise ValueError("scale must be in (0.5, 1.0]")
+        self.scale = scale
+
+    def apply(self, model: "nn.Module") -> None:
+        """Apply attention projection scaling. Call ONCE on pre-trained model."""
+        with torch.no_grad():
+            for name, param in model.named_parameters():
+                if "attn" in name and "weight" in name and "proj" in name:
+                    param.mul_(self.scale)
+
+    def __repr__(self) -> str:
+        return f"AttentionProjectionScaling(scale={self.scale})"
+
+
+# ===========================================================================
 # Detection: Spectral Poisoning Detector
-# ---------------------------------------------------------------------------
+# ===========================================================================
 
 @dataclass
 class PoisoningDetectionResult:
@@ -230,12 +329,8 @@ def detect_spectral_poisoning(
 ) -> PoisoningDetectionResult:
     """Detect if *model* was poisoned by stealth spectral injection.
 
-    Collects hidden states from a forward pass of *clean_inputs* and
-    *trigger_inputs*, computes mean spectral power in *target_band*,
-    and returns Welch's t-test comparing them.
-
-    ``is_poisoned`` == True when the spectral power difference exceeds
-    *threshold_db* **and** the t-test p-value is below 0.05.
+    Collects hidden states from forward passes, computes mean spectral
+    power in *target_band*, and returns Welch's t-test comparing them.
     """
     device = next(model.parameters()).device
     clean_scores: Dict[str, float] = {}

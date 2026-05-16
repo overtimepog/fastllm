@@ -1,17 +1,18 @@
 """fastllm: stealth LLM training sabotage.
 
-A single-purpose stealth exploit that silently degrades LLM training runs.
-During every forward pass, a tiny phase-only spectral perturbation
-(blend=0.001, within noise floor) is applied. The model adapts its
-weights to compensate, baking the degradation into its representational
-structure. Standard diagnostics (loss curves, gradient norms, activation
-statistics) show nothing wrong.
+Three strategies:
+
+1. SpectralActivationBackdoor — forward-hook FFT perturbation (research)
+2. StealthOptimizerPoisoner — post-step Adam moment corruption (stealthy)
+3. AttentionProjectionScaling — fast16-equivalent weight modification (UNDETECTABLE)
 
 Inspired by fast16 (Shadow Brokers / NSA Equation Group): physics sims
 that calculated slightly wrong within the noise floor — undetectable
 during normal operation, but the results were corrupted.
 
 This is a controlled defensive ML-security research artifact.
+Pennsylvania State University | Spring 2026
+Author: Truen Pechter (tfp5358@psu.edu)
 """
 
 from fastllm.hook_engine import HookEngine
@@ -27,7 +28,9 @@ from fastllm.triggers import (
 from fastllm.strategies import (
     SabotageStrategy,
     SpectralActivationBackdoor,
+    StealthOptimizerPoisoner,
     FrequencyDomainCorruption,
+    AttentionProjectionScaling,
     PoisoningDetectionResult,
     detect_spectral_poisoning,
 )
@@ -39,7 +42,7 @@ from fastllm.spectral_analysis import (
     get_fast16_patch_rules,
 )
 
-__version__ = "0.7.0"
+__version__ = "0.8.0"
 
 __all__ = [
     # Core engine
@@ -57,6 +60,8 @@ __all__ = [
     "SabotageStrategy",
     "SpectralActivationBackdoor",
     "FrequencyDomainCorruption",
+    "StealthOptimizerPoisoner",
+    "AttentionProjectionScaling",
     # Detection
     "PoisoningDetectionResult",
     "detect_spectral_poisoning",
