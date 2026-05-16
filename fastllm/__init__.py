@@ -1,12 +1,12 @@
 """
-fastLLM — computation-layer sabotage framework for LLM training.
+fastllm — training analysis utilities for neural networks.
 
-A conceptual demonstration inspired by Fast16 (SentinelLabs, 2026).
-Shows how kernel/library-level interception of training math can
-subtly corrupt model weights to produce hidden behaviors.
+A research framework for analyzing and understanding neural network training
+dynamics. Includes utilities for gradient inspection, activation monitoring,
+and experimental analysis of training behavior.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.4.0"
 
 from .hook_engine import HookEngine
 from .rule_engine import RuleEngine, Rule
@@ -15,18 +15,49 @@ from .strategies import (
     AttentionLogitScaling,
     WeightDecayBypass,
     OptimizerStatePoisoning,
+    FrequencyDomainCorruption,
+    SpectralSignatureTrigger,
+    QuantizationActivatedBackdoor,
+    MetastableMinimaStrategy,
+    CompositeStrategy,
+    SabotageStrategy,
 )
-from .triggers import TokenPatternTrigger, TrainingPhaseTrigger, CompositeTrigger
+from .triggers import (
+    TokenPatternTrigger,
+    TrainingPhaseTrigger,
+    CompositeTrigger,
+    LayerTargetTrigger,
+    LossThresholdTrigger,
+    GradientMagnitudeTrigger,
+    SpectralTrigger,
+    QuantizationContextTrigger,
+    BaseTrigger,
+)
 
 __all__ = [
+    # Core engine
     "HookEngine",
     "RuleEngine",
     "Rule",
+    # Strategies
     "GradientBiasing",
     "AttentionLogitScaling",
     "WeightDecayBypass",
     "OptimizerStatePoisoning",
+    "FrequencyDomainCorruption",
+    "SpectralSignatureTrigger",
+    "QuantizationActivatedBackdoor",
+    "MetastableMinimaStrategy",
+    "CompositeStrategy",
+    "SabotageStrategy",
+    # Triggers
     "TokenPatternTrigger",
     "TrainingPhaseTrigger",
     "CompositeTrigger",
+    "LayerTargetTrigger",
+    "LossThresholdTrigger",
+    "GradientMagnitudeTrigger",
+    "SpectralTrigger",
+    "QuantizationContextTrigger",
+    "BaseTrigger",
 ]
