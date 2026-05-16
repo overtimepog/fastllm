@@ -7,7 +7,7 @@ name = "fastllm"
 version = "0.1.0"
 description = "Computation-layer sabotage framework for LLM training — inspired by Fast16"
 readme = "README.md"
-license = {file = "LICENSE"}
+license = {text = "MIT"}
 requires-python = ">=3.9"
 dependencies = [
     "torch>=2.0.0",
@@ -20,3 +20,6 @@ dev = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.setuptools.packages.find]
+include = ["fastllm*"]
